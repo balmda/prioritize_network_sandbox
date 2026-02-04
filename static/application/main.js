@@ -164,37 +164,29 @@ function jenksBreaks(data, nClasses) {
 function setupPopUp(f, l) {
   const p = f.properties || {};
 
-  // ---------- helpers ----------
-  function fmt(n, d = 2) {
-    if (n === null || n === undefined || n === "") return "";
-    const x = Number(n);
-    if (!isFinite(x)) return String(n);
-    return x.toFixed(d);
-  }
-
-  // Deterministic colors based on criterion index
-  // (stable across sessions + machines)
+  // Deterministic colors based on criterion index (stable)
   const barColors = chroma
-    .scale(["#4C78A8", "#F58518", "#54A24B", "#E45756", "#B279A2", "#FF9DA6", "#9D755D", "#BAB0AC"])
+    .scale([
+      "#4C78A8",
+      "#F58518",
+      "#54A24B",
+      "#E45756",
+      "#B279A2",
+      "#FF9DA6",
+      "#9D755D",
+      "#BAB0AC",
+    ])
     .mode("lch")
     .colors(CRITERIA.length);
 
-  // ---------- compute stacked bar data ----------
-  // We'll use composition contributions (these sum to Priority_Score_Composition)
-  // contribution = <crit>_norm_score_composition
+  // Composition stacked bar segments
   const contribs = CRITERIA.map((c, i) => {
     const v = Number(p[`${c}_norm_score_composition`]);
-    return {
-      key: c,
-      val: isFinite(v) ? v : 0,
-      color: barColors[i],
-    };
+    return { key: c, val: isFinite(v) ? v : 0, color: barColors[i] };
   });
 
   const contribTotal = contribs.reduce((acc, o) => acc + o.val, 0);
 
-  // Convert contributions to percent widths
-  // If total is 0, just show empty bar.
   const segmentsHtml =
     contribTotal > 0
       ? contribs
@@ -204,11 +196,7 @@ function setupPopUp(f, l) {
             return `
               <div
                 title="${title}"
-                style="
-                  width:${pct}%;
-                  background:${o.color};
-                  height:14px;
-                "
+                style="width:${pct}%; background:${o.color}; height:14px;"
               ></div>`;
           })
           .join("")
@@ -235,7 +223,6 @@ function setupPopUp(f, l) {
     </div>
   `;
 
-  // ---------- header ----------
   const header = `
     <div style="min-width: 460px; max-width: 860px;">
       <div style="font-weight: 700; margin-bottom: 6px;">
@@ -244,6 +231,7 @@ function setupPopUp(f, l) {
 
       <div style="margin-bottom: 10px;">
         <div><strong>Priority Score (Norm Sum):</strong> ${fmt(p.Priority_Score_Norm, 3)}</div>
+        <div><strong>Priority Score (Scaled 0–1):</strong> ${fmt(p.Priority_Score_Scaled, 3)}</div>
         <div><strong>Priority Score (Composition Sum):</strong> ${fmt(p.Priority_Score_Composition, 3)}</div>
 
         <div style="margin-top:6px;">
@@ -277,7 +265,6 @@ function setupPopUp(f, l) {
           <tbody>
   `;
 
-  // ---------- rows ----------
   let rows = "";
   CRITERIA.forEach((c, i) => {
     rows += `
@@ -295,7 +282,6 @@ function setupPopUp(f, l) {
       </tr>`;
   });
 
-  // ---------- footer ----------
   const footer = `
           </tbody>
         </table>
@@ -310,13 +296,13 @@ function setupPopUp(f, l) {
   });
 }
 
-
 // ===========================
 // Classification state per layer
 // ===========================
 var CLASS_STATE = {
   norm: { breaks: null, scale: null },
   composition: { breaks: null, scale: null },
+  scaled: { breaks: null, scale: null },
 };
 
 function computeClassState(layer, propName, stateKey) {
@@ -360,9 +346,20 @@ function stylePriorityComposition(feature) {
   return { color: state.scale(v).hex(), weight: 3, opacity: 1 };
 }
 
+function stylePriorityScaled(feature) {
+  const v = feature.properties.Priority_Score_Scaled;
+  const state = CLASS_STATE.scaled;
+
+  // fallback (continuous) if breaks not ready
+  if (!state.scale) {
+    const cont = chroma.scale(priorityColorSpectrum).domain([0, 1]);
+    return { color: cont(v).hex(), weight: 3, opacity: 1 };
+  }
+  return { color: state.scale(v).hex(), weight: 3, opacity: 1 };
+}
+
 // Difference: normalized to [-1,1]
 var diffScale = chroma.scale(differenceColorSpectrum).domain([-1, 1]);
-
 function styleDifference(feature) {
   const v = feature.properties.Difference_Score;
   return { color: diffScale(v).hex(), weight: 3, opacity: 1 };
@@ -372,10 +369,17 @@ function styleDifference(feature) {
 // Layers
 // ===========================
 var priorityNormLayer = new L.GeoJSON.AJAX(serviceURL, { style: stylePriorityNorm, onEachFeature: setupPopUp });
+
 var priorityCompositionLayer = new L.GeoJSON.AJAX(serviceURL, {
   style: stylePriorityComposition,
   onEachFeature: setupPopUp,
 });
+
+var priorityScaledLayer = new L.GeoJSON.AJAX(serviceURL, {
+  style: stylePriorityScaled,
+  onEachFeature: setupPopUp,
+});
+
 var differenceLayer = new L.GeoJSON.AJAX(serviceURL, { style: styleDifference, onEachFeature: setupPopUp });
 
 priorityNormLayer.on("data:loaded", function () {
@@ -387,6 +391,12 @@ priorityNormLayer.on("data:loaded", function () {
 priorityCompositionLayer.on("data:loaded", function () {
   computeClassState(priorityCompositionLayer, "Priority_Score_Composition", "composition");
   priorityCompositionLayer.setStyle(stylePriorityComposition);
+  updateLegend();
+});
+
+priorityScaledLayer.on("data:loaded", function () {
+  computeClassState(priorityScaledLayer, "Priority_Score_Scaled", "scaled");
+  priorityScaledLayer.setStyle(stylePriorityScaled);
   updateLegend();
 });
 
@@ -409,6 +419,7 @@ function refreshGeojson() {
   }).done(function () {
     priorityNormLayer.refresh();
     priorityCompositionLayer.refresh();
+    priorityScaledLayer.refresh();
     differenceLayer.refresh();
   });
 }
@@ -425,6 +436,7 @@ var baseMaps = {
 
 var overlayMaps = {
   "Priority (Norm Sum) — Jenks (5 bins)": priorityNormLayer,
+  "Priority (Scaled 0–1) — Jenks (5 bins)": priorityScaledLayer,
   "Priority (Composition Sum) — Jenks (5 bins)": priorityCompositionLayer,
   "Difference (Last Run, Norm Sum) — [-1,1]": differenceLayer,
 };
@@ -435,10 +447,11 @@ L.control.layers(baseMaps, overlayMaps).addTo(map);
 // Legend (switches by active overlay)
 // ===========================
 var legend = L.control({ position: "bottomright" });
-var ACTIVE_LEGEND = "norm"; // norm | composition | difference
+var ACTIVE_LEGEND = "norm"; // norm | scaled | composition | difference
 
 map.on("overlayadd", function (e) {
   if (e.layer === priorityNormLayer) ACTIVE_LEGEND = "norm";
+  if (e.layer === priorityScaledLayer) ACTIVE_LEGEND = "scaled";
   if (e.layer === priorityCompositionLayer) ACTIVE_LEGEND = "composition";
   if (e.layer === differenceLayer) ACTIVE_LEGEND = "difference";
   updateLegend();
@@ -447,17 +460,29 @@ map.on("overlayadd", function (e) {
 map.on("overlayremove", function (e) {
   // If the active legend layer was removed, prefer another active overlay
   if (e.layer === priorityNormLayer && ACTIVE_LEGEND === "norm") {
-    if (map.hasLayer(priorityCompositionLayer)) ACTIVE_LEGEND = "composition";
+    if (map.hasLayer(priorityScaledLayer)) ACTIVE_LEGEND = "scaled";
+    else if (map.hasLayer(priorityCompositionLayer)) ACTIVE_LEGEND = "composition";
     else if (map.hasLayer(differenceLayer)) ACTIVE_LEGEND = "difference";
   }
-  if (e.layer === priorityCompositionLayer && ACTIVE_LEGEND === "composition") {
-    if (map.hasLayer(priorityNormLayer)) ACTIVE_LEGEND = "norm";
-    else if (map.hasLayer(differenceLayer)) ACTIVE_LEGEND = "difference";
-  }
-  if (e.layer === differenceLayer && ACTIVE_LEGEND === "difference") {
+
+  if (e.layer === priorityScaledLayer && ACTIVE_LEGEND === "scaled") {
     if (map.hasLayer(priorityNormLayer)) ACTIVE_LEGEND = "norm";
     else if (map.hasLayer(priorityCompositionLayer)) ACTIVE_LEGEND = "composition";
+    else if (map.hasLayer(differenceLayer)) ACTIVE_LEGEND = "difference";
   }
+
+  if (e.layer === priorityCompositionLayer && ACTIVE_LEGEND === "composition") {
+    if (map.hasLayer(priorityNormLayer)) ACTIVE_LEGEND = "norm";
+    else if (map.hasLayer(priorityScaledLayer)) ACTIVE_LEGEND = "scaled";
+    else if (map.hasLayer(differenceLayer)) ACTIVE_LEGEND = "difference";
+  }
+
+  if (e.layer === differenceLayer && ACTIVE_LEGEND === "difference") {
+    if (map.hasLayer(priorityNormLayer)) ACTIVE_LEGEND = "norm";
+    else if (map.hasLayer(priorityScaledLayer)) ACTIVE_LEGEND = "scaled";
+    else if (map.hasLayer(priorityCompositionLayer)) ACTIVE_LEGEND = "composition";
+  }
+
   updateLegend();
 });
 
@@ -513,6 +538,11 @@ function updateLegend() {
     legend._container.innerHTML = buildLegendHTMLJenks(
       "composition",
       "Priority (Composition Sum) — Jenks (5 bins)"
+    );
+  } else if (ACTIVE_LEGEND === "scaled") {
+    legend._container.innerHTML = buildLegendHTMLJenks(
+      "scaled",
+      "Priority (Scaled 0–1) — Jenks (5 bins)"
     );
   } else if (ACTIVE_LEGEND === "difference") {
     legend._container.innerHTML = buildLegendHTMLDifference();
