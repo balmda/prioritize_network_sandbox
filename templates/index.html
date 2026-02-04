@@ -49,41 +49,81 @@
 
   <!-- Make criteria list available to JS -->
   <script>
-    window.CRITERIA = {{ criteria_keys | tojson }};
+    // Prefer criteria_keys if present; fall back to CRITERIA; final fallback empty list.
+    window.CRITERIA =
+      {{ (criteria_keys if criteria_keys is defined else (CRITERIA if CRITERIA is defined else [])) | tojson }};
   </script>
 </head>
 
 <body>
   <nav class="navbar navbar-dark bg-dark">
     <a class="navbar-brand mb-0 h1" href="#">Network Prioritization</a>
-    <a class="navbar-brand mb-0 p" href="#">{{ project_title }}</a>
+    <a class="navbar-brand mb-0 p" href="#">{{ project_title if project_title is defined else "" }}</a>
   </nav>
 
   <nav class="sidebar-nav navbar-dark bg-dark">
     <!-- refreshGeojson() intercepts submit; prevents POST / (405) -->
     <form id="sliderForm" method="POST" onsubmit="refreshGeojson();return false;">
-      {% for c in criteria_meta %}
-        <div class="variableContainer">
-          <p>{{ c.label }}</p>
-          <output class="output"
-                  name="{{ c.key }}-text"
-                  id="{{ c.key }}OutputId">{{ c.value }}</output>
-        </div>
 
-        <div class="slidecontainer">
-          <div class="sliderdiv">
-            <input type="range"
-                   min="0"
-                   max="10"
-                   step="0.5"
-                   value="{{ c.value }}"
-                   class="slider"
-                   id="slider_{{ c.key }}"
-                   name="{{ c.key }}"
-                   oninput="{{ c.key }}OutputId.value = this.value">
+      {# ---------------------------------------------
+         Preferred path: criteria_meta passed from app.py
+         Each item should look like:
+           { key: "strava", label: "Strava Usage", value: 5.0 }
+         --------------------------------------------- #}
+      {% if criteria_meta is defined and criteria_meta %}
+        {% for c in criteria_meta %}
+          <div class="variableContainer">
+            <p>{{ c.label if c.label is defined else c.key }}</p>
+            <output class="output"
+                    name="{{ c.key }}-text"
+                    id="{{ c.key }}OutputId">{{ c.value }}</output>
           </div>
-        </div>
-      {% endfor %}
+
+          <div class="slidecontainer">
+            <div class="sliderdiv">
+              <input type="range"
+                     min="{{ weight_min if weight_min is defined else 0 }}"
+                     max="{{ weight_max if weight_max is defined else 10 }}"
+                     step="{{ weight_step if weight_step is defined else 0.5 }}"
+                     value="{{ c.value }}"
+                     class="slider"
+                     id="slider_{{ c.key }}"
+                     name="{{ c.key }}"
+                     oninput="{{ c.key }}OutputId.value = this.value">
+            </div>
+          </div>
+        {% endfor %}
+
+      {# ---------------------------------------------
+         Fallback path: criteria_keys + weights
+         This keeps sliders working even if you didn't build criteria_meta.
+         --------------------------------------------- #}
+      {% else %}
+        {% set _keys = criteria_keys if criteria_keys is defined else (CRITERIA if CRITERIA is defined else []) %}
+        {% for k in _keys %}
+          {% set _val = (weights[k] if weights is defined and k in weights else (globals().get(k) if globals is defined else 5.0)) %}
+          <div class="variableContainer">
+            <p>{{ k }}</p>
+            <output class="output"
+                    name="{{ k }}-text"
+                    id="{{ k }}OutputId">{{ _val }}</output>
+          </div>
+
+          <div class="slidecontainer">
+            <div class="sliderdiv">
+              <input type="range"
+                     min="{{ weight_min if weight_min is defined else 0 }}"
+                     max="{{ weight_max if weight_max is defined else 10 }}"
+                     step="{{ weight_step if weight_step is defined else 0.5 }}"
+                     value="{{ _val }}"
+                     class="slider"
+                     id="slider_{{ k }}"
+                     name="{{ k }}"
+                     oninput="{{ k }}OutputId.value = this.value">
+            </div>
+          </div>
+        {% endfor %}
+      {% endif %}
 
       <div>
         <input class="updateButton" type="submit" value="Reweight Analysis">

@@ -4,11 +4,7 @@ $(document).ready(function () {
   console.log("Document Ready");
 });
 
-// ===========================
-// Config
-// ===========================
-const filePath = "static/application/data/WestValleyATPNetwork.geojson"; // unused
-const serviceURL = "/api/network_geojson.geojson"; // dynamic weighted reference
+const serviceURL = "/api/network_geojson.geojson";
 
 // Criteria order (prefer Jinja-injected window.CRITERIA)
 var CRITERIA =
@@ -26,13 +22,14 @@ var CRITERIA =
         "pedconnectivity",
       ];
 
-// Discrete classification (Jenks)
 var N_CLASSES = 5;
 
-// Color palettes
+// Palettes
 var priorityColorSpectrum = ["ffe760", "ff5656", "773131"];
 var differenceColorSpectrum = ["67a9cf", "f7f7f7", "ef8a62"];
-var differenceDomains = [-1, 1];
+
+// Difference is already normalized to [-1, 1] by app.py
+var DIFFERENCE_BINS = [-1, -0.6, -0.2, 0.2, 0.6, 1];
 
 // ===========================
 // Map init
@@ -78,7 +75,7 @@ var ESRI_Satellite = L.tileLayer(
 Grey.addTo(map);
 
 // ===========================
-// Formatting helpers
+// Helpers
 // ===========================
 function fmt(n, d = 2) {
   if (n === null || n === undefined || n === "") return "";
@@ -88,7 +85,7 @@ function fmt(n, d = 2) {
 }
 
 // ===========================
-// Jenks helpers
+// Jenks
 // ===========================
 function jenksBreaks(data, nClasses) {
   const values = data
@@ -98,7 +95,6 @@ function jenksBreaks(data, nClasses) {
 
   if (values.length === 0) return null;
 
-  // If too few unique values, fall back to "unique breaks" padded to length nClasses+1
   const uniq = Array.from(new Set(values));
   if (uniq.length <= nClasses) {
     const b = [values[0], ...uniq.slice(1), values[values.length - 1]];
@@ -163,88 +159,83 @@ function jenksBreaks(data, nClasses) {
 }
 
 // ===========================
-// Difference styling
-// ===========================
-var differenceColorScale = chroma.scale(differenceColorSpectrum).domain(differenceDomains);
-
-function differenceColor(feature) {
-  return {
-    color: differenceColorScale(feature.properties.Difference_Score).hex(),
-    weight: 3,
-    opacity: 1,
-  };
-}
-
-// ===========================
-// Deterministic chroma colors for stacked bar
-// ===========================
-function getCriteriaColors(criteria) {
-  const colors = {};
-  const n = Math.max(1, criteria.length);
-
-  criteria.forEach((c, i) => {
-    const hue = (i * 360) / n;
-    colors[c] = chroma.lch(65, 55, hue).hex();
-  });
-
-  return colors;
-}
-
-function buildCompositionStackBar(p, criteria) {
-  const total = Number(p.Priority_Score_Composition);
-  if (!isFinite(total) || total <= 0) return "";
-
-  const colorMap = getCriteriaColors(criteria);
-
-  let segments = "";
-  let legendItems = "";
-
-  criteria.forEach((c) => {
-    const comp = Number(p[`${c}_norm_score_composition`]);
-    if (!isFinite(comp) || comp <= 0) return;
-
-    const pct = Math.max(0, Math.min(100, (comp / total) * 100));
-    const col = colorMap[c];
-
-    segments += `
-      <div
-        title="${c}: ${fmt(pct, 1)}%"
-        style="width:${pct}%; height:12px; background:${col};">
-      </div>`;
-
-    legendItems += `
-      <div style="display:flex; align-items:center; gap:6px; margin-right:10px; white-space:nowrap;">
-        <span style="display:inline-block; width:10px; height:10px; background:${col}; border:1px solid rgba(0,0,0,0.25);"></span>
-        <span>${c}</span>
-      </div>`;
-  });
-
-  return `
-    <div style="margin-top:10px;">
-      <div style="font-size:11px; opacity:0.9; margin-bottom:6px;">
-        <strong>Composition (share of Priority Score)</strong>
-      </div>
-
-      <div style="display:flex; width:100%; border:1px solid rgba(0,0,0,0.25); border-radius:3px; overflow:hidden;">
-        ${segments}
-      </div>
-
-      <div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; font-size:11px; opacity:0.9;">
-        ${legendItems}
-      </div>
-
-      <div style="font-size:10.5px; opacity:0.75; margin-top:6px;">
-        Each color shows the % contribution of that criterion to this segment’s Priority Score.
-      </div>
-    </div>`;
-}
-
-// ===========================
 // Popup
 // ===========================
 function setupPopUp(f, l) {
   const p = f.properties || {};
 
+  // ---------- helpers ----------
+  function fmt(n, d = 2) {
+    if (n === null || n === undefined || n === "") return "";
+    const x = Number(n);
+    if (!isFinite(x)) return String(n);
+    return x.toFixed(d);
+  }
+
+  // Deterministic colors based on criterion index
+  // (stable across sessions + machines)
+  const barColors = chroma
+    .scale(["#4C78A8", "#F58518", "#54A24B", "#E45756", "#B279A2", "#FF9DA6", "#9D755D", "#BAB0AC"])
+    .mode("lch")
+    .colors(CRITERIA.length);
+
+  // ---------- compute stacked bar data ----------
+  // We'll use composition contributions (these sum to Priority_Score_Composition)
+  // contribution = <crit>_norm_score_composition
+  const contribs = CRITERIA.map((c, i) => {
+    const v = Number(p[`${c}_norm_score_composition`]);
+    return {
+      key: c,
+      val: isFinite(v) ? v : 0,
+      color: barColors[i],
+    };
+  });
+
+  const contribTotal = contribs.reduce((acc, o) => acc + o.val, 0);
+
+  // Convert contributions to percent widths
+  // If total is 0, just show empty bar.
+  const segmentsHtml =
+    contribTotal > 0
+      ? contribs
+          .map((o) => {
+            const pct = (o.val / contribTotal) * 100;
+            const title = `${o.key}: ${fmt(o.val, 3)} (${fmt(pct, 1)}%)`;
+            return `
+              <div
+                title="${title}"
+                style="
+                  width:${pct}%;
+                  background:${o.color};
+                  height:14px;
+                "
+              ></div>`;
+          })
+          .join("")
+      : "";
+
+  const barHtml = `
+    <div style="margin: 10px 0 12px 0;">
+      <div style="font-weight:600; margin-bottom:6px;">Composition Contribution (stacked)</div>
+      <div
+        style="
+          display:flex;
+          width:100%;
+          border:1px solid rgba(0,0,0,0.15);
+          border-radius:4px;
+          overflow:hidden;
+          background: rgba(0,0,0,0.04);
+        "
+      >
+        ${segmentsHtml}
+      </div>
+      <div style="font-size:11px; opacity:0.8; margin-top:6px;">
+        Each segment width = that criterion’s share of the composition score (hover for details).
+      </div>
+    </div>
+  `;
+
+  // ---------- header ----------
   const header = `
     <div style="min-width: 460px; max-width: 860px;">
       <div style="font-weight: 700; margin-bottom: 6px;">
@@ -254,15 +245,20 @@ function setupPopUp(f, l) {
       <div style="margin-bottom: 10px;">
         <div><strong>Priority Score (Norm Sum):</strong> ${fmt(p.Priority_Score_Norm, 3)}</div>
         <div><strong>Priority Score (Composition Sum):</strong> ${fmt(p.Priority_Score_Composition, 3)}</div>
-        <div><strong>Difference:</strong> ${fmt(p.Difference_Score, 3)}</div>
-        <div><strong>Weight Sum:</strong> ${fmt(p.Weight_Sum, 1)}</div>
 
-        <div style="font-size: 11px; opacity: 0.8; margin-top: 6px;">
-          <strong>Contribution (Composition)</strong> = (Input × Weight) ÷ Sum(Weights) for this segment.
+        <div style="margin-top:6px;">
+          <div><strong>Difference (Last Run, Raw):</strong> ${fmt(p.Difference_Raw, 4)}</div>
+          <div><strong>Difference (Last Run, Normalized):</strong> ${fmt(p.Difference_Score, 3)}</div>
+          <div style="font-size: 11px; opacity: 0.8;">
+            Raw = current Priority (Norm Sum) − previous Priority (Norm Sum).<br>
+            Normalized is scaled to [-1, 1] across the network for map coloring.
+          </div>
         </div>
 
-        ${buildCompositionStackBar(p, CRITERIA)}
+        <div style="margin-top:6px;"><strong>Weight Sum:</strong> ${fmt(p.Weight_Sum, 1)}</div>
       </div>
+
+      ${barHtml}
 
       <div style="font-weight:600; margin-bottom:6px;">Criteria</div>
       <div style="max-height: 300px; overflow:auto; border-top:1px solid rgba(0,0,0,0.1); padding-top:8px;">
@@ -281,37 +277,25 @@ function setupPopUp(f, l) {
           <tbody>
   `;
 
+  // ---------- rows ----------
   let rows = "";
-  CRITERIA.forEach((c) => {
-    const input = p[`${c}_input`];
-    const weight = p[`${c}_weight`];
-    const score = p[`${c}_weighted`];
-    const networkMax = p[`${c}_network_max_score`];
-    const normNetwork = p[`${c}_norm_score_network`];
-    const normComposition = p[`${c}_norm_score_composition`];
-
-    const hasSomething =
-      input !== undefined ||
-      weight !== undefined ||
-      score !== undefined ||
-      networkMax !== undefined ||
-      normNetwork !== undefined ||
-      normComposition !== undefined;
-
-    if (hasSomething) {
-      rows += `
-        <tr>
-          <td style="padding: 2px 6px; white-space: nowrap;">${c}</td>
-          <td style="padding: 2px 6px; text-align:right;">${fmt(input, 2)}</td>
-          <td style="padding: 2px 6px; text-align:right;">${fmt(weight, 1)}</td>
-          <td style="padding: 2px 6px; text-align:right;">${fmt(score, 3)}</td>
-          <td style="padding: 2px 6px; text-align:right;">${fmt(networkMax, 3)}</td>
-          <td style="padding: 2px 6px; text-align:right;">${fmt(normNetwork, 3)}</td>
-          <td style="padding: 2px 6px; text-align:right;">${fmt(normComposition, 3)}</td>
-        </tr>`;
-    }
+  CRITERIA.forEach((c, i) => {
+    rows += `
+      <tr>
+        <td style="padding: 2px 6px; white-space: nowrap;">
+          <span style="display:inline-block;width:10px;height:10px;background:${barColors[i]};border-radius:2px;margin-right:6px;"></span>
+          ${c}
+        </td>
+        <td style="padding: 2px 6px; text-align:right;">${fmt(p[`${c}_input`], 2)}</td>
+        <td style="padding: 2px 6px; text-align:right;">${fmt(p[`${c}_weight`], 1)}</td>
+        <td style="padding: 2px 6px; text-align:right;">${fmt(p[`${c}_weighted`], 3)}</td>
+        <td style="padding: 2px 6px; text-align:right;">${fmt(p[`${c}_network_max_score`], 3)}</td>
+        <td style="padding: 2px 6px; text-align:right;">${fmt(p[`${c}_norm_score_network`], 3)}</td>
+        <td style="padding: 2px 6px; text-align:right;">${fmt(p[`${c}_norm_score_composition`], 3)}</td>
+      </tr>`;
   });
 
+  // ---------- footer ----------
   const footer = `
           </tbody>
         </table>
@@ -319,14 +303,13 @@ function setupPopUp(f, l) {
     </div>
   `;
 
-  const html = header + rows + footer;
-
-  l.bindPopup(html, {
+  l.bindPopup(header + rows + footer, {
     maxWidth: 860,
     className: "customPopUp",
     autoPanPadding: [20, 20],
   });
 }
+
 
 // ===========================
 // Classification state per layer
@@ -336,7 +319,6 @@ var CLASS_STATE = {
   composition: { breaks: null, scale: null },
 };
 
-// build discrete scale + breaks for a given property name
 function computeClassState(layer, propName, stateKey) {
   const gj = layer.toGeoJSON();
   const vals = (gj.features || [])
@@ -346,25 +328,21 @@ function computeClassState(layer, propName, stateKey) {
   const breaks = jenksBreaks(vals, N_CLASSES);
   if (!breaks) return;
 
-  // Force last break >= max
   const vmax = Math.max(...vals.map(Number).filter((v) => isFinite(v)));
   breaks[breaks.length - 1] = Math.max(breaks[breaks.length - 1], vmax);
 
   CLASS_STATE[stateKey].breaks = breaks;
   CLASS_STATE[stateKey].scale = chroma.scale(priorityColorSpectrum).classes(breaks);
-
-  console.log(`Jenks breaks (${propName}):`, breaks);
 }
 
 // ===========================
-// Layer styles (two priority layers)
+// Styles
 // ===========================
 function stylePriorityNorm(feature) {
   const v = feature.properties.Priority_Score_Norm;
   const state = CLASS_STATE.norm;
 
   if (!state.scale) {
-    // fallback continuous
     const cont = chroma.scale(priorityColorSpectrum).domain([0, CRITERIA.length]);
     return { color: cont(v).hex(), weight: 3, opacity: 1 };
   }
@@ -376,26 +354,30 @@ function stylePriorityComposition(feature) {
   const state = CLASS_STATE.composition;
 
   if (!state.scale) {
-    // fallback continuous (composition is typically ~1–3)
     const cont = chroma.scale(priorityColorSpectrum).domain([0, 3]);
     return { color: cont(v).hex(), weight: 3, opacity: 1 };
   }
   return { color: state.scale(v).hex(), weight: 3, opacity: 1 };
 }
 
-// Options for three overlays
-var priorityNormOptions = { style: stylePriorityNorm, onEachFeature: setupPopUp };
-var priorityCompositionOptions = { style: stylePriorityComposition, onEachFeature: setupPopUp };
-var differenceOptions = { style: differenceColor, onEachFeature: setupPopUp };
+// Difference: normalized to [-1,1]
+var diffScale = chroma.scale(differenceColorSpectrum).domain([-1, 1]);
+
+function styleDifference(feature) {
+  const v = feature.properties.Difference_Score;
+  return { color: diffScale(v).hex(), weight: 3, opacity: 1 };
+}
 
 // ===========================
 // Layers
 // ===========================
-var priorityNormLayer = new L.GeoJSON.AJAX(serviceURL, priorityNormOptions);
-var priorityCompositionLayer = new L.GeoJSON.AJAX(serviceURL, priorityCompositionOptions);
-var differenceLayer = new L.GeoJSON.AJAX(serviceURL, differenceOptions);
+var priorityNormLayer = new L.GeoJSON.AJAX(serviceURL, { style: stylePriorityNorm, onEachFeature: setupPopUp });
+var priorityCompositionLayer = new L.GeoJSON.AJAX(serviceURL, {
+  style: stylePriorityComposition,
+  onEachFeature: setupPopUp,
+});
+var differenceLayer = new L.GeoJSON.AJAX(serviceURL, { style: styleDifference, onEachFeature: setupPopUp });
 
-// When data loads/refreshed, recompute Jenks breaks for BOTH priority layers
 priorityNormLayer.on("data:loaded", function () {
   computeClassState(priorityNormLayer, "Priority_Score_Norm", "norm");
   priorityNormLayer.setStyle(stylePriorityNorm);
@@ -408,7 +390,7 @@ priorityCompositionLayer.on("data:loaded", function () {
   updateLegend();
 });
 
-// Default overlay: Priority (Norm Sum)
+// Default overlay
 priorityNormLayer.addTo(map);
 
 // ===========================
@@ -420,17 +402,14 @@ function refreshGeojson() {
     new_weights[this.name] = this.value;
   });
 
-  var req = $.ajax({
+  $.ajax({
     url: "/revise_weights",
     type: "POST",
     data: new_weights,
-  });
-
-  req.done(function () {
+  }).done(function () {
     priorityNormLayer.refresh();
     priorityCompositionLayer.refresh();
     differenceLayer.refresh();
-    console.log("Refreshed Layers.");
   });
 }
 
@@ -445,36 +424,44 @@ var baseMaps = {
 };
 
 var overlayMaps = {
-  "Priority (Norm Sum) — Jenks 5 bins": priorityNormLayer,
-  "Priority (Composition Sum) — Jenks 5 bins": priorityCompositionLayer,
-  "Difference (Norm Sum vs Baseline)": differenceLayer,
+  "Priority (Norm Sum) — Jenks (5 bins)": priorityNormLayer,
+  "Priority (Composition Sum) — Jenks (5 bins)": priorityCompositionLayer,
+  "Difference (Last Run, Norm Sum) — [-1,1]": differenceLayer,
 };
 
 L.control.layers(baseMaps, overlayMaps).addTo(map);
 
-// Track which legend we should show (based on active overlay)
-var ACTIVE_LEGEND = "norm"; // "norm" or "composition"
+// ===========================
+// Legend (switches by active overlay)
+// ===========================
+var legend = L.control({ position: "bottomright" });
+var ACTIVE_LEGEND = "norm"; // norm | composition | difference
 
 map.on("overlayadd", function (e) {
   if (e.layer === priorityNormLayer) ACTIVE_LEGEND = "norm";
   if (e.layer === priorityCompositionLayer) ACTIVE_LEGEND = "composition";
+  if (e.layer === differenceLayer) ACTIVE_LEGEND = "difference";
   updateLegend();
 });
 
-// If user turns off the active one, keep legend as-is (or switch if other is on)
 map.on("overlayremove", function (e) {
-  // If they removed the active layer, try to pick the other if it is visible
-  if (e.layer === priorityNormLayer && map.hasLayer(priorityCompositionLayer)) ACTIVE_LEGEND = "composition";
-  if (e.layer === priorityCompositionLayer && map.hasLayer(priorityNormLayer)) ACTIVE_LEGEND = "norm";
+  // If the active legend layer was removed, prefer another active overlay
+  if (e.layer === priorityNormLayer && ACTIVE_LEGEND === "norm") {
+    if (map.hasLayer(priorityCompositionLayer)) ACTIVE_LEGEND = "composition";
+    else if (map.hasLayer(differenceLayer)) ACTIVE_LEGEND = "difference";
+  }
+  if (e.layer === priorityCompositionLayer && ACTIVE_LEGEND === "composition") {
+    if (map.hasLayer(priorityNormLayer)) ACTIVE_LEGEND = "norm";
+    else if (map.hasLayer(differenceLayer)) ACTIVE_LEGEND = "difference";
+  }
+  if (e.layer === differenceLayer && ACTIVE_LEGEND === "difference") {
+    if (map.hasLayer(priorityNormLayer)) ACTIVE_LEGEND = "norm";
+    else if (map.hasLayer(priorityCompositionLayer)) ACTIVE_LEGEND = "composition";
+  }
   updateLegend();
 });
 
-// ===========================
-// Legend (5 bins, dynamic)
-// ===========================
-var legend = L.control({ position: "bottomright" });
-
-function buildLegendHTMLFor(stateKey, title) {
+function buildLegendHTMLJenks(stateKey, title) {
   const state = CLASS_STATE[stateKey];
   let html = `<h6><strong>${title}</strong></h6>`;
 
@@ -484,18 +471,38 @@ function buildLegendHTMLFor(stateKey, title) {
   }
 
   const colors = chroma.scale(priorityColorSpectrum).colors(N_CLASSES);
-
   html += `<div style="margin-top:6px;">`;
+
   for (let i = 0; i < N_CLASSES; i++) {
-    const a = state.breaks[i];
-    const b = state.breaks[i + 1];
     html += `
       <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
         <i style="background:${colors[i]}; width:12px; height:12px; display:inline-block;"></i>
-        <span style="font-size:11px;">${fmt(a, 3)} – ${fmt(b, 3)}</span>
+        <span style="font-size:11px;">${fmt(state.breaks[i], 3)} – ${fmt(state.breaks[i + 1], 3)}</span>
+      </div>`;
+  }
+
+  html += `</div>`;
+  return html;
+}
+
+function buildLegendHTMLDifference() {
+  let html = `<h6><strong>Difference (Last Run)</strong></h6>`;
+  html += `<div style="font-size:11px;opacity:0.8;margin-bottom:6px;">Normalized to [-1, 1]</div>`;
+
+  const colors = chroma.scale(differenceColorSpectrum).colors(N_CLASSES);
+
+  html += `<div style="margin-top:6px;">`;
+  for (let i = 0; i < N_CLASSES; i++) {
+    const a = DIFFERENCE_BINS[i];
+    const b = DIFFERENCE_BINS[i + 1];
+    html += `
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
+        <i style="background:${colors[i]}; width:12px; height:12px; display:inline-block;"></i>
+        <span style="font-size:11px;">${fmt(a, 2)} – ${fmt(b, 2)}</span>
       </div>`;
   }
   html += `</div>`;
+
   return html;
 }
 
@@ -503,18 +510,20 @@ function updateLegend() {
   if (!legend || !legend._container) return;
 
   if (ACTIVE_LEGEND === "composition") {
-    legend._container.innerHTML = buildLegendHTMLFor(
+    legend._container.innerHTML = buildLegendHTMLJenks(
       "composition",
       "Priority (Composition Sum) — Jenks (5 bins)"
     );
+  } else if (ACTIVE_LEGEND === "difference") {
+    legend._container.innerHTML = buildLegendHTMLDifference();
   } else {
-    legend._container.innerHTML = buildLegendHTMLFor("norm", "Priority (Norm Sum) — Jenks (5 bins)");
+    legend._container.innerHTML = buildLegendHTMLJenks("norm", "Priority (Norm Sum) — Jenks (5 bins)");
   }
 }
 
 legend.onAdd = function () {
   var div = L.DomUtil.create("div", "info legend");
-  div.innerHTML = buildLegendHTMLFor("norm", "Priority (Norm Sum) — Jenks (5 bins)");
+  div.innerHTML = buildLegendHTMLJenks("norm", "Priority (Norm Sum) — Jenks (5 bins)");
   return div;
 };
 
@@ -524,14 +533,12 @@ legend.addTo(map);
 // Download button
 // ===========================
 var download = L.control({ position: "bottomleft" });
-
 download.onAdd = function () {
   var div = L.DomUtil.create("div", "button");
   div.innerHTML =
     "<a href=" + serviceURL + ' download="network.geojson">' + "<h6 class='download'>DOWNLOAD</h6></a>";
   return div;
 };
-
 download.addTo(map);
 
 // ===========================
@@ -545,6 +552,5 @@ function recomputeWeightedSum() {
   });
   $("h6.sliderTotalSum").text(sliderOutputSum.toFixed(1));
 }
-
 recomputeWeightedSum();
 $(".slider").on("input", recomputeWeightedSum);
