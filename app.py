@@ -31,7 +31,7 @@ CRITERIA: List[str] = [
 # 0–10 weights (align with your sliders)
 DEFAULT_WEIGHTS: Dict[str, float] = {k: 5.0 for k in CRITERIA}
 
-# Map slider names -> GeoJSON property names (source fields in your base GeoJSON)
+# Map slider names -> GeoJSON property names (source fields in base GeoJSON)
 FIELD_MAP: Dict[str, str] = {
     "strava": "Strava_Score",
     "ucatsbicycle": "UCATBKUse_Score",
@@ -44,7 +44,6 @@ FIELD_MAP: Dict[str, str] = {
     "pedconnectivity": "PedConnect_Score",
 }
 
-# If you want nicer labels in the slider UI, update these:
 LABEL_MAP: Dict[str, str] = {
     "strava": "Strava Usage",
     "ucatsbicycle": "UCATS Bicycle Index",
@@ -57,8 +56,7 @@ LABEL_MAP: Dict[str, str] = {
     "pedconnectivity": "Pedestrian Connectivity",
 }
 
-# Which *source* properties to remove from the exported/downloaded GeoJSON
-# (We use them for computation, but you asked not to export them.)
+# Drop original source score fields from output (still used internally)
 SOURCE_SCORE_FIELDS_TO_DROP = set(FIELD_MAP.values())
 
 
@@ -84,10 +82,7 @@ def _safe_float(v: Any, default: float = 0.0) -> float:
 
 
 def _parse_weights(form: Dict[str, Any]) -> Dict[str, float]:
-    """
-    Parse POSTed slider weights, falling back to last session values/defaults.
-    Weights expected 0–10 (step 0.5).
-    """
+    """Parse POSTed slider weights; expected 0–10 (step 0.5)."""
     prior = session.get("weights", DEFAULT_WEIGHTS)
     weights: Dict[str, float] = {}
 
@@ -97,7 +92,6 @@ def _parse_weights(form: Dict[str, Any]) -> Dict[str, float]:
         else:
             weights[k] = _safe_float(prior.get(k, DEFAULT_WEIGHTS[k]), default=DEFAULT_WEIGHTS[k])
 
-        # clamp to [0, 10]
         weights[k] = max(0.0, min(10.0, weights[k]))
 
     return weights
@@ -109,7 +103,6 @@ def _normalize(values: List[float], out_min: float, out_max: float) -> List[floa
         return []
     vmin, vmax = min(values), max(values)
     if vmax == vmin:
-        # flat -> 0 if centered domain (e.g., [-1,1])
         if out_min < 0 < out_max:
             return [0.0 for _ in values]
         return [out_min for _ in values]
@@ -118,7 +111,7 @@ def _normalize(values: List[float], out_min: float, out_max: float) -> List[floa
 
 
 def _scale_0_1(values: List[float]) -> List[float]:
-    """Scale list to [0,1] by min-max. Flat list -> 0.0."""
+    """Min-max scale to [0,1]. Flat list -> 0.0."""
     if not values:
         return []
     vmin, vmax = min(values), max(values)
@@ -134,11 +127,11 @@ def _compute_per_feature_fields(props: Dict[str, Any], weights: Dict[str, float]
     Per criterion outputs:
       - <crit>_input
       - <crit>_weight
-      - <crit>_score                         = input × weight
-      - <crit>_norm_score_composition        = (input×weight) / sum(weights)
+      - <crit>_score                  = input × weight
+      - <crit>_norm_score_composition = (input×weight) / sum(weights)
 
     Returns:
-      - fields dict (without network max info)
+      - fields dict (no network max yet)
       - weight_sum
     """
     fields: Dict[str, Any] = {}
@@ -157,7 +150,7 @@ def _compute_per_feature_fields(props: Dict[str, Any], weights: Dict[str, float]
 
         weight_sum += w
 
-    # composition normalization (within segment)
+    # composition normalization (within segment): score / sum(weights)
     if weight_sum > 0:
         for crit in CRITERIA:
             fields[f"{crit}_norm_score_composition"] = fields[f"{crit}_score"] / weight_sum
@@ -171,22 +164,17 @@ def _compute_per_feature_fields(props: Dict[str, Any], weights: Dict[str, float]
 def _add_network_max_and_norm(fields_list: List[Dict[str, Any]]) -> Dict[str, float]:
     """
     Adds to each fields dict:
-      - <crit>_network_max_score            = max(score) across all segments
-      - <crit>_norm_score_network           = score / network_max_score
-
-    Returns:
-      network_max_by_crit
+      - <crit>_network_max_score  = max(score) across all segments
+      - <crit>_norm_score_network = score / network_max_score
     """
     network_max_by_crit: Dict[str, float] = {crit: 0.0 for crit in CRITERIA}
 
-    # find max per criterion for score
     for fields in fields_list:
         for crit in CRITERIA:
             v = _safe_float(fields.get(f"{crit}_score", 0.0), default=0.0)
             if v > network_max_by_crit[crit]:
                 network_max_by_crit[crit] = v
 
-    # add back to each feature
     for fields in fields_list:
         for crit in CRITERIA:
             max_v = network_max_by_crit.get(crit, 0.0)
@@ -197,15 +185,15 @@ def _add_network_max_and_norm(fields_list: List[Dict[str, Any]]) -> Dict[str, fl
     return network_max_by_crit
 
 
-def _priority_norm_sum(fields: Dict[str, Any]) -> float:
-    """Priority score (norm sum): sum of per-criterion network-normalized scores."""
-    return sum(_safe_float(fields.get(f"{crit}_norm_score_network", 0.0)) for crit in CRITERIA)
+def _priority_score(fields: Dict[str, Any]) -> float:
+    """NEW Priority Score: sum of raw per-criterion score (input × weight)."""
+    return sum(_safe_float(fields.get(f"{crit}_score", 0.0)) for crit in CRITERIA)
 
 
 def _priority_composition_sum(fields: Dict[str, Any]) -> float:
     """
-    Priority score (composition sum): sum of per-criterion composition shares.
-    This equals: (sum(score_i) / sum(weights)) for the segment.
+    Sum of composition contributions.
+    Equals: sum(score_i / sum(weights)) = (sum(score_i)) / sum(weights)
     """
     return sum(_safe_float(fields.get(f"{crit}_norm_score_composition", 0.0)) for crit in CRITERIA)
 
@@ -213,7 +201,6 @@ def _priority_composition_sum(fields: Dict[str, Any]) -> float:
 def _criterion_diffs(current_fields: Dict[str, Any], prev_fields: Dict[str, Any]) -> Dict[str, Any]:
     """
     Per-criterion diffs (current - prev) for export/download.
-    Creates:
       - <crit>_score_diff
       - <crit>_norm_score_network_diff
       - <crit>_norm_score_composition_diff
@@ -233,7 +220,7 @@ def _criterion_diffs(current_fields: Dict[str, Any], prev_fields: Dict[str, Any]
 
 
 def _drop_source_scores(props: Dict[str, Any]) -> None:
-    """Remove the original source *_Score fields from the outgoing properties (in-place)."""
+    """Remove original source *_Score fields from outgoing properties (in-place)."""
     for k in list(props.keys()):
         if k in SOURCE_SCORE_FIELDS_TO_DROP:
             props.pop(k, None)
@@ -270,7 +257,7 @@ def index():
 
 @app.route("/revise_weights", methods=["POST"])
 def revise_weights():
-    # Capture "last run" weights before overwriting
+    # capture "last run" weights before overwriting
     current = session.get("weights", DEFAULT_WEIGHTS)
     session["prev_weights"] = current
 
@@ -285,28 +272,20 @@ def network_geojson():
     """
     Returns dynamically reweighted FeatureCollection.
 
-    Core outputs (map + popup):
-      - Priority_Score_Norm              = sum(<crit>_norm_score_network)
-      - Priority_Score_Composition       = sum(<crit>_norm_score_composition)
-      - Priority_Score_Scaled            = min-max scale Priority_Score_Norm to [0,1]
+    Key outputs:
+      - Priority_Score               = sum(score_i) where score_i = input_i × weight_i
+      - Priority_Score_Scaled        = min-max scale Priority_Score to [0,1]
+      - Priority_Score_Composition   = sum(score_i / sum(weights)) (weighted-average-like)
 
-      - Difference_Raw                   = current Priority_Score_Norm - last-run Priority_Score_Norm
-      - Difference_Score                 = min-max normalize Difference_Raw to [-1,1]
+      - Difference_Raw               = current Priority_Score - previous Priority_Score
+      - Difference_Score             = min-max normalize Difference_Raw to [-1,1] for map coloring
 
-    Also includes per-criterion fields:
-      - <crit>_input
-      - <crit>_weight
-      - <crit>_score
+    Keeps per-criterion diagnostic fields:
       - <crit>_network_max_score
       - <crit>_norm_score_network
       - <crit>_norm_score_composition
 
-    Export/download additions:
-      - <crit>_score_diff
-      - <crit>_norm_score_network_diff
-      - <crit>_norm_score_composition_diff
-
-    And removes original source score columns (e.g., Strava_Score, etc.).
+    Drops original source *_Score fields from output.
     """
     weights = session.get("weights", DEFAULT_WEIGHTS)
     prev_weights = session.get("prev_weights", weights)  # first load => no difference
@@ -317,6 +296,7 @@ def network_geojson():
     # ---- current fields ----
     current_fields_list: List[Dict[str, Any]] = []
     current_weight_sums: List[float] = []
+
     for feat in feats:
         props = feat.get("properties") or {}
         fields, weight_sum = _compute_per_feature_fields(props, weights)
@@ -325,9 +305,9 @@ def network_geojson():
 
     _add_network_max_and_norm(current_fields_list)
 
-    current_priority_norm = [_priority_norm_sum(f) for f in current_fields_list]
+    current_priority = [_priority_score(f) for f in current_fields_list]
     current_priority_comp = [_priority_composition_sum(f) for f in current_fields_list]
-    current_priority_scaled = _scale_0_1(current_priority_norm)
+    current_priority_scaled = _scale_0_1(current_priority)
 
     # ---- previous (last-run) fields ----
     prev_fields_list: List[Dict[str, Any]] = []
@@ -338,11 +318,11 @@ def network_geojson():
 
     _add_network_max_and_norm(prev_fields_list)
 
-    prev_priority_norm = [_priority_norm_sum(f) for f in prev_fields_list]
+    prev_priority = [_priority_score(f) for f in prev_fields_list]
     prev_priority_comp = [_priority_composition_sum(f) for f in prev_fields_list]
 
-    # ---- differences ----
-    diff_raw = [c - p for c, p in zip(current_priority_norm, prev_priority_norm)]
+    # ---- differences (now based on Priority_Score) ----
+    diff_raw = [c - p for c, p in zip(current_priority, prev_priority)]
     diff_score = _normalize(diff_raw, -1.0, 1.0) if diff_raw else []
 
     diff_comp_raw = [c - p for c, p in zip(current_priority_comp, prev_priority_comp)]
@@ -358,30 +338,25 @@ def network_geojson():
     for i, feat in enumerate(feats):
         props = (feat.get("properties") or {}).copy()
 
-        # remove original source score fields (Strava_Score, etc.)
+        # drop original source score fields
         _drop_source_scores(props)
 
-        # rollup
         props["Weight_Sum"] = current_weight_sums[i] if i < len(current_weight_sums) else 0.0
 
-        # priority scores used by map/popup
-        props["Priority_Score_Norm"] = current_priority_norm[i] if i < len(current_priority_norm) else 0.0
+        # NEW primary priority fields
+        props["Priority_Score"] = current_priority[i] if i < len(current_priority) else 0.0
+        props["Priority_Score_Scaled"] = current_priority_scaled[i] if i < len(current_priority_scaled) else 0.0
         props["Priority_Score_Composition"] = (
             current_priority_comp[i] if i < len(current_priority_comp) else 0.0
         )
-        props["Priority_Score_Scaled"] = (
-            current_priority_scaled[i] if i < len(current_priority_scaled) else 0.0
-        )
 
-        # differences (norm-based)
+        # differences (Priority_Score-based)
         props["Difference_Raw"] = diff_raw[i] if i < len(diff_raw) else 0.0
         props["Difference_Score"] = diff_score[i] if i < len(diff_score) else 0.0
 
-        # differences (composition-based) useful for download/export
+        # composition differences (useful for export)
         props["Difference_Composition_Raw"] = diff_comp_raw[i] if i < len(diff_comp_raw) else 0.0
-        props["Difference_Composition_Score"] = (
-            diff_comp_score[i] if i < len(diff_comp_score) else 0.0
-        )
+        props["Difference_Composition_Score"] = diff_comp_score[i] if i < len(diff_comp_score) else 0.0
 
         # per-criterion computed fields (current)
         props.update(current_fields_list[i])
@@ -414,5 +389,4 @@ def health():
 
 
 if __name__ == "__main__":
-    # If you run into port collisions / intercepts, change port (e.g., 5055)
     app.run(host="127.0.0.1", port=5000, debug=True)

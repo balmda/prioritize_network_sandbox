@@ -171,7 +171,6 @@ function jenksBreaks(data, nClasses) {
 function setupPopUp(f, l) {
   const p = f.properties || {};
 
-  // Deterministic colors based on criterion index (stable)
   const barColors = chroma
     .scale([
       "#4C78A8",
@@ -186,7 +185,6 @@ function setupPopUp(f, l) {
     .mode("lch")
     .colors(CRITERIA.length);
 
-  // Composition stacked bar segments
   const contribs = CRITERIA.map((c, i) => {
     const v = Number(p[`${c}_norm_score_composition`]);
     return { key: c, val: isFinite(v) ? v : 0, color: barColors[i] };
@@ -237,7 +235,7 @@ function setupPopUp(f, l) {
       </div>
 
       <div style="margin-bottom: 10px;">
-        <div><strong>Priority Score (Norm Sum):</strong> ${fmt(p.Priority_Score_Norm, 3)}</div>
+        <div><strong>Priority Score:</strong> ${fmt(p.Priority_Score, 3)}</div>
         <div><strong>Priority Score (Scaled 0–1):</strong> ${fmt(p.Priority_Score_Scaled, 3)}</div>
         <div><strong>Priority Score (Composition Sum):</strong> ${fmt(p.Priority_Score_Composition, 3)}</div>
 
@@ -245,7 +243,7 @@ function setupPopUp(f, l) {
           <div><strong>Difference (Last Run, Raw):</strong> ${fmt(p.Difference_Raw, 4)}</div>
           <div><strong>Difference (Last Run, Normalized):</strong> ${fmt(p.Difference_Score, 3)}</div>
           <div style="font-size: 11px; opacity: 0.8;">
-            Raw = current Priority (Norm Sum) − previous Priority (Norm Sum).<br>
+            Raw = current Priority Score − previous Priority Score.<br>
             Normalized is scaled to [-1, 1] across the network for map coloring.
           </div>
         </div>
@@ -308,7 +306,7 @@ function setupPopUp(f, l) {
 // Classification state per layer
 // ===========================
 var CLASS_STATE = {
-  norm: { breaks: null, scale: null },
+  score: { breaks: null, scale: null },
   composition: { breaks: null, scale: null },
   scaled: { breaks: null, scale: null },
 };
@@ -332,12 +330,12 @@ function computeClassState(layer, propName, stateKey) {
 // ===========================
 // Styles
 // ===========================
-function stylePriorityNorm(feature) {
-  const v = feature.properties.Priority_Score_Norm;
-  const state = CLASS_STATE.norm;
+function stylePriorityScore(feature) {
+  const v = feature.properties.Priority_Score;
+  const state = CLASS_STATE.score;
 
   if (!state.scale) {
-    const cont = chroma.scale(priorityColorSpectrum).domain([0, CRITERIA.length]);
+    const cont = chroma.scale(priorityColorSpectrum).domain([0, 30]); // fallback
     return { color: cont(v).hex(), weight: 3, opacity: 1 };
   }
   return { color: state.scale(v).hex(), weight: 3, opacity: 1 };
@@ -369,11 +367,7 @@ function stylePriorityScaled(feature) {
 function styleTopScaled(feature) {
   const v = feature.properties.Priority_Score_Scaled;
   const c = chroma.scale(priorityColorSpectrum).domain([0, 1])(v).hex();
-  return {
-    color: c,
-    weight: 7,
-    opacity: 1,
-  };
+  return { color: c, weight: 7, opacity: 1 };
 }
 
 // Difference: normalized to [-1,1]
@@ -386,8 +380,8 @@ function styleDifference(feature) {
 // ===========================
 // Layers
 // ===========================
-var priorityNormLayer = new L.GeoJSON.AJAX(serviceURL, {
-  style: stylePriorityNorm,
+var priorityScoreLayer = new L.GeoJSON.AJAX(serviceURL, {
+  style: stylePriorityScore,
   onEachFeature: setupPopUp,
 });
 
@@ -401,7 +395,6 @@ var priorityScaledLayer = new L.GeoJSON.AJAX(serviceURL, {
   onEachFeature: setupPopUp,
 });
 
-// NEW: highlight only scaled 0.9–1.0
 var topScaledLayer = new L.GeoJSON.AJAX(serviceURL, {
   filter: function (feature) {
     const v = Number(feature.properties.Priority_Score_Scaled);
@@ -416,10 +409,9 @@ var differenceLayer = new L.GeoJSON.AJAX(serviceURL, {
   onEachFeature: setupPopUp,
 });
 
-// Compute Jenks breaks on load for each main layer
-priorityNormLayer.on("data:loaded", function () {
-  computeClassState(priorityNormLayer, "Priority_Score_Norm", "norm");
-  priorityNormLayer.setStyle(stylePriorityNorm);
+priorityScoreLayer.on("data:loaded", function () {
+  computeClassState(priorityScoreLayer, "Priority_Score", "score");
+  priorityScoreLayer.setStyle(stylePriorityScore);
   updateLegend();
 });
 
@@ -435,18 +427,15 @@ priorityScaledLayer.on("data:loaded", function () {
   updateLegend();
 });
 
-// Optional: log how many segments are in the highlight layer each refresh
 topScaledLayer.on("data:loaded", function () {
   try {
     const n = (topScaledLayer.toGeoJSON().features || []).length;
     console.log("Top Scaled (0.9–1.0) features:", n);
-  } catch (e) {
-    // ignore
-  }
+  } catch (e) {}
 });
 
 // Default overlay
-priorityNormLayer.addTo(map);
+priorityScoreLayer.addTo(map);
 
 // ===========================
 // Refresh weights
@@ -462,7 +451,7 @@ function refreshGeojson() {
     type: "POST",
     data: new_weights,
   }).done(function () {
-    priorityNormLayer.refresh();
+    priorityScoreLayer.refresh();
     priorityCompositionLayer.refresh();
     priorityScaledLayer.refresh();
     topScaledLayer.refresh();
@@ -481,11 +470,11 @@ var baseMaps = {
 };
 
 var overlayMaps = {
-  "Priority (Norm Sum) — Jenks (5 bins)": priorityNormLayer,
+  "Priority (Score Sum) — Jenks (5 bins)": priorityScoreLayer,
   "Priority (Scaled 0–1) — Jenks (5 bins)": priorityScaledLayer,
   "Top Scaled Segments (0.9–1.0)": topScaledLayer,
   "Priority (Composition Sum) — Jenks (5 bins)": priorityCompositionLayer,
-  "Difference (Last Run, Norm Sum) — [-1,1]": differenceLayer,
+  "Difference (Last Run, Priority Score) — [-1,1]": differenceLayer,
 };
 
 L.control.layers(baseMaps, overlayMaps).addTo(map);
@@ -494,39 +483,38 @@ L.control.layers(baseMaps, overlayMaps).addTo(map);
 // Legend (switches by active overlay)
 // ===========================
 var legend = L.control({ position: "bottomright" });
-var ACTIVE_LEGEND = "norm"; // norm | scaled | composition | difference
+var ACTIVE_LEGEND = "score"; // score | scaled | composition | difference
 
 map.on("overlayadd", function (e) {
-  if (e.layer === priorityNormLayer) ACTIVE_LEGEND = "norm";
+  if (e.layer === priorityScoreLayer) ACTIVE_LEGEND = "score";
   if (e.layer === priorityScaledLayer) ACTIVE_LEGEND = "scaled";
   if (e.layer === priorityCompositionLayer) ACTIVE_LEGEND = "composition";
   if (e.layer === differenceLayer) ACTIVE_LEGEND = "difference";
-  // NOTE: topScaledLayer does NOT change legend (it’s a highlight overlay)
+  // topScaledLayer does not change legend
   updateLegend();
 });
 
 map.on("overlayremove", function (e) {
-  // If the active legend layer was removed, prefer another active overlay
-  if (e.layer === priorityNormLayer && ACTIVE_LEGEND === "norm") {
+  if (e.layer === priorityScoreLayer && ACTIVE_LEGEND === "score") {
     if (map.hasLayer(priorityScaledLayer)) ACTIVE_LEGEND = "scaled";
     else if (map.hasLayer(priorityCompositionLayer)) ACTIVE_LEGEND = "composition";
     else if (map.hasLayer(differenceLayer)) ACTIVE_LEGEND = "difference";
   }
 
   if (e.layer === priorityScaledLayer && ACTIVE_LEGEND === "scaled") {
-    if (map.hasLayer(priorityNormLayer)) ACTIVE_LEGEND = "norm";
+    if (map.hasLayer(priorityScoreLayer)) ACTIVE_LEGEND = "score";
     else if (map.hasLayer(priorityCompositionLayer)) ACTIVE_LEGEND = "composition";
     else if (map.hasLayer(differenceLayer)) ACTIVE_LEGEND = "difference";
   }
 
   if (e.layer === priorityCompositionLayer && ACTIVE_LEGEND === "composition") {
-    if (map.hasLayer(priorityNormLayer)) ACTIVE_LEGEND = "norm";
+    if (map.hasLayer(priorityScoreLayer)) ACTIVE_LEGEND = "score";
     else if (map.hasLayer(priorityScaledLayer)) ACTIVE_LEGEND = "scaled";
     else if (map.hasLayer(differenceLayer)) ACTIVE_LEGEND = "difference";
   }
 
   if (e.layer === differenceLayer && ACTIVE_LEGEND === "difference") {
-    if (map.hasLayer(priorityNormLayer)) ACTIVE_LEGEND = "norm";
+    if (map.hasLayer(priorityScoreLayer)) ACTIVE_LEGEND = "score";
     else if (map.hasLayer(priorityScaledLayer)) ACTIVE_LEGEND = "scaled";
     else if (map.hasLayer(priorityCompositionLayer)) ACTIVE_LEGEND = "composition";
   }
@@ -550,10 +538,7 @@ function buildLegendHTMLJenks(stateKey, title) {
     html += `
       <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
         <i style="background:${colors[i]}; width:12px; height:12px; display:inline-block;"></i>
-        <span style="font-size:11px;">${fmt(state.breaks[i], 3)} – ${fmt(
-      state.breaks[i + 1],
-      3
-    )}</span>
+        <span style="font-size:11px;">${fmt(state.breaks[i], 3)} – ${fmt(state.breaks[i + 1], 3)}</span>
       </div>`;
   }
 
@@ -578,7 +563,6 @@ function buildLegendHTMLDifference() {
       </div>`;
   }
   html += `</div>`;
-
   return html;
 }
 
@@ -598,13 +582,16 @@ function updateLegend() {
   } else if (ACTIVE_LEGEND === "difference") {
     legend._container.innerHTML = buildLegendHTMLDifference();
   } else {
-    legend._container.innerHTML = buildLegendHTMLJenks("norm", "Priority (Norm Sum) — Jenks (5 bins)");
+    legend._container.innerHTML = buildLegendHTMLJenks(
+      "score",
+      "Priority (Score Sum) — Jenks (5 bins)"
+    );
   }
 }
 
 legend.onAdd = function () {
   var div = L.DomUtil.create("div", "info legend");
-  div.innerHTML = buildLegendHTMLJenks("norm", "Priority (Norm Sum) — Jenks (5 bins)");
+  div.innerHTML = buildLegendHTMLJenks("score", "Priority (Score Sum) — Jenks (5 bins)");
   return div;
 };
 
