@@ -1,17 +1,13 @@
 // Main Application JS File
 
-//Jquery Ready
 $(document).ready(function () {
   console.log("Document Ready");
 });
 
-// Establish Key Variables/Const
-const filePath = "static/application/data/WestValleyATPNetwork.geojson"; // static reference (unused)
-const serviceURL = "/api/network_geojson.geojson"; // dynamic weighted reference (absolute path)
+const filePath = "static/application/data/WestValleyATPNetwork.geojson"; // unused
+const serviceURL = "/api/network_geojson.geojson"; // dynamic weighted reference
 
-// Domains / palettes
-var valueDomains = [1, 3];
-var differenceDomains = [-1, 1];
+// Palette for the ramp
 var priorityColorSpectrum = ["ffe760", "ff5656", "773131"];
 var differenceColorSpectrum = ["67a9cf", "f7f7f7", "ef8a62"];
 
@@ -31,11 +27,16 @@ var CRITERIA =
         "pedconnectivity",
       ];
 
-// Leaflet style options
+// Priority norm range is roughly [0, #criteria]
+var PRIORITY_NORM_MAX = CRITERIA.length;
+
+// Domains / palettes
+var valueDomains = [0, PRIORITY_NORM_MAX];
+var differenceDomains = [-1, 1];
+
 var priorityOptions = { style: priorityColor, onEachFeature: setupPopUp };
 var differenceOptions = { style: differenceColor, onEachFeature: setupPopUp };
 
-// Set Up Map Basic
 var map = L.map("map").setView([40.688, -112.0], 13);
 
 // ===========================
@@ -82,9 +83,10 @@ Grey.addTo(map);
 priorityColorScale = chroma.scale(priorityColorSpectrum).domain(valueDomains);
 differenceColorScale = chroma.scale(differenceColorSpectrum).domain(differenceDomains);
 
+// IMPORTANT: color ramp uses Priority_Score_Norm now
 function priorityColor(feature) {
   return {
-    color: priorityColorScale(feature.properties.Priority_Score),
+    color: priorityColorScale(feature.properties.Priority_Score_Norm),
     weight: 3,
     opacity: 1,
   };
@@ -117,8 +119,8 @@ function getCriteriaColors(criteria) {
   const n = Math.max(1, criteria.length);
 
   criteria.forEach((c, i) => {
-    const hue = (i * 360) / n; // evenly spaced hues
-    const col = chroma.lch(65, 55, hue).hex(); // L, C, H
+    const hue = (i * 360) / n;
+    const col = chroma.lch(65, 55, hue).hex();
     colors[c] = col;
   });
 
@@ -128,8 +130,6 @@ function getCriteriaColors(criteria) {
 /**
  * Stacked bar: percent contribution of each criterion
  * to Priority_Score_Composition.
- *
- * Share = <crit>_norm_score_composition / Priority_Score_Composition
  */
 function buildCompositionStackBar(p, criteria) {
   const total = Number(p.Priority_Score_Composition);
@@ -190,12 +190,8 @@ function setupPopUp(f, l) {
       </div>
 
       <div style="margin-bottom: 10px;">
-        <div><strong>Priority Score:</strong> ${fmt(p.Priority_Score, 3)}</div>
         <div><strong>Priority Score (Norm Sum):</strong> ${fmt(p.Priority_Score_Norm, 3)}</div>
-        <div><strong>Priority Score (Composition Sum):</strong> ${fmt(
-          p.Priority_Score_Composition,
-          3
-        )}</div>
+        <div><strong>Priority Score (Composition Sum):</strong> ${fmt(p.Priority_Score_Composition, 3)}</div>
         <div><strong>Difference:</strong> ${fmt(p.Difference_Score, 3)}</div>
         <div><strong>Weight Sum:</strong> ${fmt(p.Weight_Sum, 1)}</div>
 
@@ -283,7 +279,6 @@ function refreshGeojson() {
   $(".slider").each(function () {
     new_weights[this.name] = this.value;
   });
-  console.log(new_weights);
 
   var req = $.ajax({
     url: "/revise_weights",
@@ -316,17 +311,18 @@ var overlayMaps = {
 L.control.layers(baseMaps, overlayMaps).addTo(map);
 
 // ===========================
-// Legend
+// Legend (now for Priority_Score_Norm)
 // ===========================
 var legend = L.control({ position: "bottomright" });
 
 legend.onAdd = function () {
-  var div = L.DomUtil.create("div", "info legend"),
-    grades = [1, 2, 3],
-    labels = ["Low", "Medium", "High"],
-    title = "<h6><strong> Prioritization Scores </strong></h6>";
+  var div = L.DomUtil.create("div", "info legend");
 
-  div.innerHTML = title + "<br>";
+  var grades = [0, PRIORITY_NORM_MAX / 2, PRIORITY_NORM_MAX];
+  var labels = ["Low", "Medium", "High"];
+
+  div.innerHTML = "<h6><strong> Priority (Norm Sum) </strong></h6><br>";
+
   for (var i = 0; i < grades.length; i++) {
     div.innerHTML +=
       '<i style="background:' +
@@ -334,9 +330,9 @@ legend.onAdd = function () {
       '"></i> ' +
       '<h6 class="legendText">' +
       labels[i] +
-      "</h6>" +
-      "<br>";
+      "</h6><br>";
   }
+
   return div;
 };
 
@@ -368,5 +364,5 @@ function recomputeWeightedSum() {
   $("h6.sliderTotalSum").text(sliderOutputSum.toFixed(1));
 }
 
-recomputeWeightedSum(); // Initial setup
+recomputeWeightedSum();
 $(".slider").on("input", recomputeWeightedSum);
