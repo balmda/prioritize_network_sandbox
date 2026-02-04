@@ -4,14 +4,13 @@ $(document).ready(function () {
   console.log("Document Ready");
 });
 
+// ===========================
+// Config
+// ===========================
 const filePath = "static/application/data/WestValleyATPNetwork.geojson"; // unused
 const serviceURL = "/api/network_geojson.geojson"; // dynamic weighted reference
 
-// Palette for the ramp
-var priorityColorSpectrum = ["ffe760", "ff5656", "773131"];
-var differenceColorSpectrum = ["67a9cf", "f7f7f7", "ef8a62"];
-
-// Criteria order (injected from Jinja via window.CRITERIA)
+// Criteria order (prefer Jinja-injected window.CRITERIA)
 var CRITERIA =
   window.CRITERIA && Array.isArray(window.CRITERIA) && window.CRITERIA.length
     ? window.CRITERIA
@@ -27,20 +26,21 @@ var CRITERIA =
         "pedconnectivity",
       ];
 
-// Priority norm range is roughly [0, #criteria]
-var PRIORITY_NORM_MAX = CRITERIA.length;
+// Discrete classification (Jenks)
+var N_CLASSES = 5;
 
-// Domains / palettes
-var valueDomains = [0, PRIORITY_NORM_MAX];
+// Color palettes
+var priorityColorSpectrum = ["ffe760", "ff5656", "773131"];
+var differenceColorSpectrum = ["67a9cf", "f7f7f7", "ef8a62"];
 var differenceDomains = [-1, 1];
 
-var priorityOptions = { style: priorityColor, onEachFeature: setupPopUp };
-var differenceOptions = { style: differenceColor, onEachFeature: setupPopUp };
-
+// ===========================
+// Map init
+// ===========================
 var map = L.map("map").setView([40.688, -112.0], 13);
 
 // ===========================
-// Basemap Options
+// Basemaps
 // ===========================
 var osmAttrib =
   '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
@@ -78,30 +78,7 @@ var ESRI_Satellite = L.tileLayer(
 Grey.addTo(map);
 
 // ===========================
-// Style Network
-// ===========================
-priorityColorScale = chroma.scale(priorityColorSpectrum).domain(valueDomains);
-differenceColorScale = chroma.scale(differenceColorSpectrum).domain(differenceDomains);
-
-// IMPORTANT: color ramp uses Priority_Score_Norm now
-function priorityColor(feature) {
-  return {
-    color: priorityColorScale(feature.properties.Priority_Score_Norm),
-    weight: 3,
-    opacity: 1,
-  };
-}
-
-function differenceColor(feature) {
-  return {
-    color: differenceColorScale(feature.properties.Difference_Score),
-    weight: 3,
-    opacity: 1,
-  };
-}
-
-// ===========================
-// Popup helpers
+// Formatting helpers
 // ===========================
 function fmt(n, d = 2) {
   if (n === null || n === undefined || n === "") return "";
@@ -110,27 +87,109 @@ function fmt(n, d = 2) {
   return x.toFixed(d);
 }
 
-/**
- * Deterministic palette based on criteria order using chroma.
- * Same criteria list (and order) => same colors every time.
- */
+// ===========================
+// Jenks helpers
+// ===========================
+function jenksBreaks(data, nClasses) {
+  const values = data
+    .map(Number)
+    .filter((v) => isFinite(v))
+    .sort((a, b) => a - b);
+
+  if (values.length === 0) return null;
+
+  // If too few unique values, fall back to "unique breaks" padded to length nClasses+1
+  const uniq = Array.from(new Set(values));
+  if (uniq.length <= nClasses) {
+    const b = [values[0], ...uniq.slice(1), values[values.length - 1]];
+    while (b.length < nClasses + 1) b.splice(b.length - 1, 0, b[b.length - 2]);
+    return b.slice(0, nClasses + 1);
+  }
+
+  const n = values.length;
+  const mat1 = Array.from({ length: n + 1 }, () => Array(nClasses + 1).fill(0));
+  const mat2 = Array.from({ length: n + 1 }, () => Array(nClasses + 1).fill(0));
+
+  for (let i = 1; i <= nClasses; i++) {
+    mat1[1][i] = 1;
+    mat2[1][i] = 0;
+    for (let j = 2; j <= n; j++) mat2[j][i] = Infinity;
+  }
+
+  let v = 0.0;
+
+  for (let l = 2; l <= n; l++) {
+    let s1 = 0.0;
+    let s2 = 0.0;
+    let w = 0.0;
+
+    for (let m = 1; m <= l; m++) {
+      const i3 = l - m + 1;
+      const val = values[i3 - 1];
+
+      s2 += val * val;
+      s1 += val;
+      w += 1;
+
+      v = s2 - (s1 * s1) / w;
+      const i4 = i3 - 1;
+
+      if (i4 !== 0) {
+        for (let j = 2; j <= nClasses; j++) {
+          if (mat2[l][j] >= v + mat2[i4][j - 1]) {
+            mat1[l][j] = i3;
+            mat2[l][j] = v + mat2[i4][j - 1];
+          }
+        }
+      }
+    }
+
+    mat1[l][1] = 1;
+    mat2[l][1] = v;
+  }
+
+  const kclass = Array(nClasses + 1).fill(0);
+  kclass[nClasses] = values[n - 1];
+  kclass[0] = values[0];
+
+  let k = n;
+  for (let j = nClasses; j >= 2; j--) {
+    const id = Math.floor(mat1[k][j]) - 2;
+    kclass[j - 1] = values[id];
+    k = Math.floor(mat1[k][j]) - 1;
+  }
+
+  return kclass;
+}
+
+// ===========================
+// Difference styling
+// ===========================
+var differenceColorScale = chroma.scale(differenceColorSpectrum).domain(differenceDomains);
+
+function differenceColor(feature) {
+  return {
+    color: differenceColorScale(feature.properties.Difference_Score).hex(),
+    weight: 3,
+    opacity: 1,
+  };
+}
+
+// ===========================
+// Deterministic chroma colors for stacked bar
+// ===========================
 function getCriteriaColors(criteria) {
   const colors = {};
   const n = Math.max(1, criteria.length);
 
   criteria.forEach((c, i) => {
     const hue = (i * 360) / n;
-    const col = chroma.lch(65, 55, hue).hex();
-    colors[c] = col;
+    colors[c] = chroma.lch(65, 55, hue).hex();
   });
 
   return colors;
 }
 
-/**
- * Stacked bar: percent contribution of each criterion
- * to Priority_Score_Composition.
- */
 function buildCompositionStackBar(p, criteria) {
   const total = Number(p.Priority_Score_Composition);
   if (!isFinite(total) || total <= 0) return "";
@@ -180,6 +239,9 @@ function buildCompositionStackBar(p, criteria) {
     </div>`;
 }
 
+// ===========================
+// Popup
+// ===========================
 function setupPopUp(f, l) {
   const p = f.properties || {};
 
@@ -267,13 +329,91 @@ function setupPopUp(f, l) {
 }
 
 // ===========================
-// Add Network & Refresh
+// Classification state per layer
 // ===========================
-var priorityLayer = new L.GeoJSON.AJAX(serviceURL, priorityOptions);
+var CLASS_STATE = {
+  norm: { breaks: null, scale: null },
+  composition: { breaks: null, scale: null },
+};
+
+// build discrete scale + breaks for a given property name
+function computeClassState(layer, propName, stateKey) {
+  const gj = layer.toGeoJSON();
+  const vals = (gj.features || [])
+    .map((f) => f.properties && f.properties[propName])
+    .filter((v) => v !== undefined);
+
+  const breaks = jenksBreaks(vals, N_CLASSES);
+  if (!breaks) return;
+
+  // Force last break >= max
+  const vmax = Math.max(...vals.map(Number).filter((v) => isFinite(v)));
+  breaks[breaks.length - 1] = Math.max(breaks[breaks.length - 1], vmax);
+
+  CLASS_STATE[stateKey].breaks = breaks;
+  CLASS_STATE[stateKey].scale = chroma.scale(priorityColorSpectrum).classes(breaks);
+
+  console.log(`Jenks breaks (${propName}):`, breaks);
+}
+
+// ===========================
+// Layer styles (two priority layers)
+// ===========================
+function stylePriorityNorm(feature) {
+  const v = feature.properties.Priority_Score_Norm;
+  const state = CLASS_STATE.norm;
+
+  if (!state.scale) {
+    // fallback continuous
+    const cont = chroma.scale(priorityColorSpectrum).domain([0, CRITERIA.length]);
+    return { color: cont(v).hex(), weight: 3, opacity: 1 };
+  }
+  return { color: state.scale(v).hex(), weight: 3, opacity: 1 };
+}
+
+function stylePriorityComposition(feature) {
+  const v = feature.properties.Priority_Score_Composition;
+  const state = CLASS_STATE.composition;
+
+  if (!state.scale) {
+    // fallback continuous (composition is typically ~1–3)
+    const cont = chroma.scale(priorityColorSpectrum).domain([0, 3]);
+    return { color: cont(v).hex(), weight: 3, opacity: 1 };
+  }
+  return { color: state.scale(v).hex(), weight: 3, opacity: 1 };
+}
+
+// Options for three overlays
+var priorityNormOptions = { style: stylePriorityNorm, onEachFeature: setupPopUp };
+var priorityCompositionOptions = { style: stylePriorityComposition, onEachFeature: setupPopUp };
+var differenceOptions = { style: differenceColor, onEachFeature: setupPopUp };
+
+// ===========================
+// Layers
+// ===========================
+var priorityNormLayer = new L.GeoJSON.AJAX(serviceURL, priorityNormOptions);
+var priorityCompositionLayer = new L.GeoJSON.AJAX(serviceURL, priorityCompositionOptions);
 var differenceLayer = new L.GeoJSON.AJAX(serviceURL, differenceOptions);
 
-priorityLayer.addTo(map);
+// When data loads/refreshed, recompute Jenks breaks for BOTH priority layers
+priorityNormLayer.on("data:loaded", function () {
+  computeClassState(priorityNormLayer, "Priority_Score_Norm", "norm");
+  priorityNormLayer.setStyle(stylePriorityNorm);
+  updateLegend();
+});
 
+priorityCompositionLayer.on("data:loaded", function () {
+  computeClassState(priorityCompositionLayer, "Priority_Score_Composition", "composition");
+  priorityCompositionLayer.setStyle(stylePriorityComposition);
+  updateLegend();
+});
+
+// Default overlay: Priority (Norm Sum)
+priorityNormLayer.addTo(map);
+
+// ===========================
+// Refresh weights
+// ===========================
 function refreshGeojson() {
   var new_weights = {};
   $(".slider").each(function () {
@@ -287,14 +427,15 @@ function refreshGeojson() {
   });
 
   req.done(function () {
-    priorityLayer.refresh();
+    priorityNormLayer.refresh();
+    priorityCompositionLayer.refresh();
     differenceLayer.refresh();
     console.log("Refreshed Layers.");
   });
 }
 
 // ===========================
-// Layer Control
+// Layer control
 // ===========================
 var baseMaps = {
   Grey: Grey,
@@ -304,42 +445,83 @@ var baseMaps = {
 };
 
 var overlayMaps = {
-  Prioritization: priorityLayer,
-  "Score Change": differenceLayer,
+  "Priority (Norm Sum) — Jenks 5 bins": priorityNormLayer,
+  "Priority (Composition Sum) — Jenks 5 bins": priorityCompositionLayer,
+  "Difference (Norm Sum vs Baseline)": differenceLayer,
 };
 
 L.control.layers(baseMaps, overlayMaps).addTo(map);
 
+// Track which legend we should show (based on active overlay)
+var ACTIVE_LEGEND = "norm"; // "norm" or "composition"
+
+map.on("overlayadd", function (e) {
+  if (e.layer === priorityNormLayer) ACTIVE_LEGEND = "norm";
+  if (e.layer === priorityCompositionLayer) ACTIVE_LEGEND = "composition";
+  updateLegend();
+});
+
+// If user turns off the active one, keep legend as-is (or switch if other is on)
+map.on("overlayremove", function (e) {
+  // If they removed the active layer, try to pick the other if it is visible
+  if (e.layer === priorityNormLayer && map.hasLayer(priorityCompositionLayer)) ACTIVE_LEGEND = "composition";
+  if (e.layer === priorityCompositionLayer && map.hasLayer(priorityNormLayer)) ACTIVE_LEGEND = "norm";
+  updateLegend();
+});
+
 // ===========================
-// Legend (now for Priority_Score_Norm)
+// Legend (5 bins, dynamic)
 // ===========================
 var legend = L.control({ position: "bottomright" });
 
-legend.onAdd = function () {
-  var div = L.DomUtil.create("div", "info legend");
+function buildLegendHTMLFor(stateKey, title) {
+  const state = CLASS_STATE[stateKey];
+  let html = `<h6><strong>${title}</strong></h6>`;
 
-  var grades = [0, PRIORITY_NORM_MAX / 2, PRIORITY_NORM_MAX];
-  var labels = ["Low", "Medium", "High"];
-
-  div.innerHTML = "<h6><strong> Priority (Norm Sum) </strong></h6><br>";
-
-  for (var i = 0; i < grades.length; i++) {
-    div.innerHTML +=
-      '<i style="background:' +
-      priorityColorScale(grades[i]) +
-      '"></i> ' +
-      '<h6 class="legendText">' +
-      labels[i] +
-      "</h6><br>";
+  if (!state.breaks || !state.scale) {
+    html += `<div style="font-size:11px;opacity:0.8;">Loading breaks…</div>`;
+    return html;
   }
 
+  const colors = chroma.scale(priorityColorSpectrum).colors(N_CLASSES);
+
+  html += `<div style="margin-top:6px;">`;
+  for (let i = 0; i < N_CLASSES; i++) {
+    const a = state.breaks[i];
+    const b = state.breaks[i + 1];
+    html += `
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
+        <i style="background:${colors[i]}; width:12px; height:12px; display:inline-block;"></i>
+        <span style="font-size:11px;">${fmt(a, 3)} – ${fmt(b, 3)}</span>
+      </div>`;
+  }
+  html += `</div>`;
+  return html;
+}
+
+function updateLegend() {
+  if (!legend || !legend._container) return;
+
+  if (ACTIVE_LEGEND === "composition") {
+    legend._container.innerHTML = buildLegendHTMLFor(
+      "composition",
+      "Priority (Composition Sum) — Jenks (5 bins)"
+    );
+  } else {
+    legend._container.innerHTML = buildLegendHTMLFor("norm", "Priority (Norm Sum) — Jenks (5 bins)");
+  }
+}
+
+legend.onAdd = function () {
+  var div = L.DomUtil.create("div", "info legend");
+  div.innerHTML = buildLegendHTMLFor("norm", "Priority (Norm Sum) — Jenks (5 bins)");
   return div;
 };
 
 legend.addTo(map);
 
 // ===========================
-// Download Button
+// Download button
 // ===========================
 var download = L.control({ position: "bottomleft" });
 
@@ -353,7 +535,7 @@ download.onAdd = function () {
 download.addTo(map);
 
 // ===========================
-// Create Sum of Elements
+// Sum of weights display
 // ===========================
 function recomputeWeightedSum() {
   var sliderOutputSum = 0;
