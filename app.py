@@ -273,12 +273,12 @@ def network_geojson():
     Returns dynamically reweighted FeatureCollection.
 
     Key outputs:
-      - Priority_Score               = sum(score_i) where score_i = input_i × weight_i
-      - Priority_Score_Scaled        = min-max scale Priority_Score to [0,1]
-      - Priority_Score_Composition   = sum(score_i / sum(weights)) (weighted-average-like)
+      - Priority_Score = sum(score_i) where score_i = input_i × weight_i
+      - Priority_Score_Scaled = min-max scale Priority_Score to [0,1]
+      - Priority_Score_Composition = sum(score_i / sum(weights)) (weighted-average-like)
 
-      - Difference_Raw               = current Priority_Score - previous Priority_Score
-      - Difference_Score             = min-max normalize Difference_Raw to [-1,1] for map coloring
+      - Difference_Raw = current Priority_Score - previous Priority_Score
+      - Difference_Score = min-max normalize Difference_Raw to [-1,1] for map coloring
 
     Keeps per-criterion diagnostic fields:
       - <crit>_network_max_score
@@ -321,7 +321,7 @@ def network_geojson():
     prev_priority = [_priority_score(f) for f in prev_fields_list]
     prev_priority_comp = [_priority_composition_sum(f) for f in prev_fields_list]
 
-    # ---- differences (now based on Priority_Score) ----
+    # ---- differences (based on Priority_Score) ----
     diff_raw = [c - p for c, p in zip(current_priority, prev_priority)]
     diff_score = _normalize(diff_raw, -1.0, 1.0) if diff_raw else []
 
